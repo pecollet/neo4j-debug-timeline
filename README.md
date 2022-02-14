@@ -13,3 +13,5 @@ Supported events :
 * custom regex
 
 Multiple files can be loaded simultaneously. Events can be grouped into separate swimlanes, either by database or by input file. If grouping by database, dbms-level events are displayed in a separate "dbms" swimlane.
+
+Public endpoint : https://s3.eu-west-2.amazonaws.com/david.pecollet.public/neo4j-debug-timeline/timeline.html
