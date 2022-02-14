@@ -1,0 +1,272 @@
+<!doctype html>
+<html>
+<head>
+  <title>Timeline</title>
+  <script type="text/javascript" src="https://unpkg.com/vis-timeline@latest/standalone/umd/vis-timeline-graph2d.min.js"></script>
+  <link href="https://unpkg.com/vis-timeline@latest/styles/vis-timeline-graph2d.min.css" rel="stylesheet" type="text/css" />
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css" rel="stylesheet">
+  <style type="text/css">
+    #visualization {
+      width: 1900px;
+      height: 800px;
+      border: 1px solid lightgray;
+    }
+    .stw {
+      border-color: orange;
+      background-color: yellow;
+    }
+    .backup {
+      border-color: green;
+      background-color: lightseagreen;
+    }    
+    .error {
+      border-color: red;
+      background-color: orange;
+    }
+    .vis-label {
+      background-color: lightgrey;
+      font-weight: bold;
+    }
+/*    .vis-time-axis {
+      background-color: lightgrey;
+    }*/
+  </style>
+</head>
+<body>
+<div>
+  <select name="grouping" id="grouping">
+    <option value="db">group by database</option>
+    <option value="file">group by file</option>
+    <!-- <option --> value="instance">group by instance</option>
+  </select>
+  <input type="checkbox" id="startup" name="startup" checked>
+  <label for="scales">Startups</label>
+  <input type="checkbox" id="backup" name="backup" checked>
+  <label for="scales">Backups</label>
+  <input type="checkbox" id="stw" name="stw" checked>
+  <label for="scales">Stop-the-world pauses (>1s)</label>
+  <input type="checkbox" id="election" name="election" checked>
+  <label for="scales">Leader changes</label>
+  <input type="checkbox" id="error" name="error">
+  <label for="scales">Errors</label>
+  <input type="checkbox" id="custom" name="custom">
+  <label for="scales">Custom : </label> <input type="text" value="type a regex" id="customRegex" name="custom">
+  <input type="checkbox" id="cp_start" name="cp_start">
+  <label for="scales">Checkpoints</label>
+</div>
+<div>
+  <button onclick="document.getElementById('file-input').click();">Open debug.log files</button>
+  <input id="file-input" type="file" name="name" style="display: none;" multiple="multiple" onclick="this.value=null;"/>
+</div>
+<div id="visualization"></div>
+<script type="text/javascript">
+  // DOM elements
+  var container = document.getElementById('visualization');
+  var fileInput = document.getElementById('file-input');
+  var groupingInput = document.getElementById('grouping');
+  var customRegexInput = document.getElementById('customRegex');
+  var checks={
+                backup:   {regex:/\[backup-server\] Handling GetDatabaseIdRequest/, enabled:true},
+                startup:  {regex:/\[o.n.i.d.DiagnosticsManager\] $/,                enabled:true},
+                election: {regex:/A new leader has been detected/,                  enabled:true, type:"point"},
+                stw:      {regex:/Detected VM stop-the-world pause/,                enabled:true, type:"point"},
+                error:    {regex:/ ERROR /,                                         enabled:false, type:"point"},
+                custom:   {regex:/type a regex/,                                    enabled:false, type:"point"},
+                cp_start: {regex:/checkpoint started/,   paired_with:"cp_end",      enabled:false, type:"background"},
+                cp_end:   {regex:/checkpoint completed/,                            enabled:false},
+             };
+             //checkpoint
+             //leadership terms
+  
+  for (const [key, value] of Object.entries(checks)) {
+    //TODO : create html elements from the list
+    var checkbox=document.getElementById(key);
+    if (checkbox) {
+        checkbox.addEventListener('click', function(){
+            if (document.getElementById(key).checked) {
+                value.enabled=true;
+                if (key == "custom") {
+                  var re = new RegExp(document.getElementById("customRegex").value);
+                  value.regex=re;
+                }
+            } else {
+                value.enabled=false;
+            }
+            if ("paired_with" in value) {checks[value.paired_with].enabled=value.enabled;}
+            console.log(checks);
+        });
+    }
+  }
+
+  //globals
+  var groupBy = "db";
+  var groups=[];
+  var items=[];
+  var timeline;
+  var eventsArray=[];
+  var fileCount=0;
+  var fileProcessed=0;
+
+  function init() {
+     timeline=null;
+     groups=[];
+     items=[];
+     eventsArray=[];
+     fileProcessed=0;
+     container.innerHTML = ""; 
+  }
+
+  init();
+  container.innerHTML = "Open one or several debug.log files to display events on a timeline."; 
+  
+
+  groupingInput.onchange = e => { 
+      groupBy = document.getElementById("grouping").value;
+      console.log("group by "+groupBy)
+  }
+
+  customRegexInput.onchange = e => { 
+    checks.custom.regex=new RegExp(document.getElementById("customRegex").value);
+    console.log(checks);
+  }
+
+  fileInput.onchange = e => { 
+     init();
+     var files = e.target.files; 
+     fileCount = files.length;
+     for (var i = 0;i < files.length;i++) { 
+        console.log("Processing "+files[i].name+ " ...");
+        //console.log(files[i]);
+        var reader = new FileReader();
+        reader.onload = fileProcessor;
+        reader.filePath = files[i].name;
+        reader.readAsText(files[i],'UTF-8');
+      }
+  }
+
+  function fileProcessor(readerEvent) {
+      var content = readerEvent.target.result; // this is the content!
+      var lines = content.split('\n');
+      console.log(readerEvent.target.filePath+" : "+lines.length+" lines");
+      for(var i = 0;i < lines.length;i++){
+          if (checkLine(lines[i], "election")) {
+              fields=lines[i].split(" ");
+              leader=fields[12].split("{")[1].slice(0, -2);
+              db=fields[5].split("/")[0].substring(1);
+              addEvent(lines[i], "New leader: "+leader, getGroup(readerEvent.target.filePath, db), "election");
+          } else if (checkLine(lines[i], "backup")) {
+              db=lines[i].split(" ")[9];
+              addEvent(lines[i], "backup", getGroup(readerEvent.target.filePath, db), "backup");
+          } else if (checkLine(lines[i], "stw")) {
+              pause=lines[i].split(" ")[9].split("=")[1].slice(0, -1);
+              if (pause > 1000) {
+                addEvent(lines[i], pause+"ms", getGroup(readerEvent.target.filePath, null), "stw");
+              }
+          } else if (checkLine(lines[i], "startup")) {
+              addEvent(lines[i], "startup", getGroup(readerEvent.target.filePath, null), "startup");
+          } else if (checkLine(lines[i], "error")) {
+              javaClass=lines[i].split(" ")[3];
+              addEvent(lines[i], "ERROR "+javaClass, getGroup(readerEvent.target.filePath, null), "error");
+          } else if (checkLine(lines[i], "custom")) {
+              addEvent(lines[i], "custom", getGroup(readerEvent.target.filePath, null), "custom");
+          } else if (checkLine(lines[i], "cp_start")) {
+              var db=lines[i].split(" ")[5].split("/")[0].substring(1);
+              var tx_id=lines[i].split("@")[1].split(" ")[2];
+              var event_id=readerEvent.target.filePath+"_"+db+"_"+tx_id;
+              addEvent(lines[i], "Checkpoint txid="+tx_id, getGroup(readerEvent.target.filePath, db), "cp_start", event_id);
+          } else if (checkLine(lines[i], "cp_end")) {
+              db=lines[i].split(" ")[5].split("/")[0].substring(1);
+              tx_id=lines[i].split("@")[1].split(" ")[2];
+              var event_id=readerEvent.target.filePath+"_"+db+"_"+tx_id;
+              setEventEnd("cp_start", event_id, lines[i]);
+          }
+          //[o.n.g.f.DatabaseManagementServiceFactory] Shutdown started
+          //[contract/6f3637dc] Election timeout triggered
+          //leadership in background
+          //[c.n.c.c.c.RaftMachine] [system/00000000] Moving to LEADER state at term 2
+          //[c.n.c.d.a.AkkaCoreTopologyService] I am server ServerId{21bd674c}. Updating leader info to member RaftMemberId{6cbae5d8} DatabaseId{e55ba130[neo4j]} and term 8
+      }
+      fileProcessed+=1;
+      if (fileProcessed == fileCount) { display() }
+  }
+  
+  function setEventEnd(category, event_id, line) {
+    var event=eventsArray.find(event => (event.event_id == event_id && event.category == category &&  !("end" in event) ));
+    if (event) {
+        event.end = getTimestamp(line.split(" "));
+    }
+  }
+
+  function addEvent(line, content, group, category, event_id) {
+      var type="box";
+      if (checks[category].type) {
+        type=checks[category].type;
+      }
+      var event={ 
+              start:    getTimestamp(line.split(" ")),
+              content:  content,
+              title:    line,
+              className: category,
+              group: group,
+              type: type,
+              category: category
+            }
+      if (typeof event_id !== 'undefined') { event.event_id=event_id; }
+      window.eventsArray.push(event);
+  }
+
+  function checkLine(line, category) {
+    // var checkbox=document.getElementById(category);
+    // if (checkbox) {
+    //   return checkbox.checked && checks[category].regex.test(line) ;
+    // } else {
+    //   return checks[category].regex.test(line) ;
+    // }
+    return checks[category].enabled && checks[category].regex.test(line) ;
+  }
+
+  function getTimestamp(fields) {
+    return fields.slice(0, 2).join(" ");
+  }
+
+  function getGroup(file, db) {
+    var group;
+    var groupId=-1;
+    if (groupBy == "db") {
+        if (db != null) {
+          group = db;
+        } else {
+          group = "dbms";
+        }
+    } else if (groupBy == "file") {
+        group = file;
+    }
+    //find or add group
+    for(var i = 0;i < window.groups.length;i++){ 
+      if (window.groups[i].content == group ) {
+        groupId=window.groups[i].id ;
+      }
+    }
+    if (groupId == -1) {
+      groupId=window.groups.length;
+      window.groups.push({content: group, id: groupId});
+    }
+    return groupId;
+  }
+  
+  function clusterCriteria(firstItem, secondItem) {
+    return (firstItem.content == secondItem.content);
+  }
+
+  function display() {
+      console.log("Processed files : "+fileProcessed+"/"+fileCount);
+      items = new vis.DataSet(window.eventsArray.filter(event => (event.category != "cp_start" ||  ("end" in event) )));  //filter any unclosed checkpoint
+      console.log("events: "+items.length);
+      console.log(eventsArray);
+      var clusterConfig={clusterCriteria:clusterCriteria, maxItems:2, titleTemplate:"{count} events"};
+      timeline = new vis.Timeline(container, items, groups, {maxHeight:1000, orientation:"both", margin:{item:2}}); //,  cluster:clusterConfig, template:template
+  }
+
+</script>
+</body>
+</html>
