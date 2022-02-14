@@ -260,7 +260,7 @@
 
   function display() {
       console.log("Processed files : "+fileProcessed+"/"+fileCount);
-      items = new vis.DataSet(window.eventsArray.filter(event => (event.category != "cp_start" ||  ("end" in event) )));  //filter any unclosed checkpoint
+      items = new vis.DataSet(window.eventsArray.filter(event => ( !(event.background in ["background", "range"]) ||  ("end" in event) )));  //filter any unclosed range
       console.log("events: "+items.length);
       console.log(eventsArray);
       var clusterConfig={clusterCriteria:clusterCriteria, maxItems:2, titleTemplate:"{count} events"};
