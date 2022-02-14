@@ -2,10 +2,10 @@
 name: Push to S3
 #description: This workflow will push the html file to a S3 bucket
 on:
-  # but only for the master branch
+  # but only for the main branch
   push:
     branches:
-      - master
+      - main
 
 jobs:
   push_html:
