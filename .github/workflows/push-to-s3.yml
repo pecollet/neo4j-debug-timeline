@@ -19,4 +19,4 @@ jobs:
           aws-region: eu-west-2
       - uses: actions/checkout@v2
       - name: upload
-        run: aws s3 sync ./timeline.html s3://david.pecollet.public/neo4j-debug-timeline/
+        run: aws s3 sync . s3://david.pecollet.public/neo4j-debug-timeline/
