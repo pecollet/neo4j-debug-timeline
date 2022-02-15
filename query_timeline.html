@@ -1,7 +1,7 @@
 <!doctype html>
 <html>
 <head>
-  <title>Timeline</title>
+  <title>Query Timeline</title>
   <script type="text/javascript" src="https://unpkg.com/vis-timeline@latest/standalone/umd/vis-timeline-graph2d.min.js"></script>
   <link href="https://unpkg.com/vis-timeline@latest/styles/vis-timeline-graph2d.min.css" rel="stylesheet" type="text/css" />
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css" rel="stylesheet">
@@ -10,15 +10,7 @@
       width: 1900px;
       height: 800px;
       border: 1px solid lightgray;
-    }
-    .stw {
-      border-color: orange;
-      background-color: yellow;
-    }
-    .backup {
-      border-color: green;
-      background-color: lightseagreen;
-    }    
+    }  
     .error {
       border-color: red;
       background-color: orange;
@@ -26,10 +18,9 @@
     .vis-label {
       background-color: lightgrey;
       font-weight: bold;
+      font-size: 65%;
+      overflow-wrap: anywhere;
     }
-/*    .vis-time-axis {
-      background-color: lightgrey;
-    }*/
   </style>
 </head>
 <body>
@@ -37,46 +28,38 @@
   <select name="grouping" id="grouping">
     <option value="db">group by database</option>
     <option value="file">group by file</option>
+    <option value="cypher">group by cypher</option>
     <!-- <option --> value="instance">group by instance</option>
   </select>
-  <input type="checkbox" id="startup" name="startup" checked>
-  <label for="scales">Startups</label>
-  <input type="checkbox" id="backup" name="backup" checked>
-  <label for="scales">Backups</label>
-  <input type="checkbox" id="stw" name="stw" checked>
-  <label for="scales">Stop-the-world pauses (>1s)</label>
-  <input type="checkbox" id="election" name="election" checked>
-  <label for="scales">Leader changes</label>
-  <input type="checkbox" id="error" name="error">
+  <input type="checkbox" id="error" name="error" checked>
   <label for="scales">Errors</label>
   <input type="checkbox" id="custom" name="custom">
   <label for="scales">Custom : </label> <input type="text" value="type a regex" id="customRegex" name="custom">
-  <input type="checkbox" id="cp_start" name="cp_start">
-  <label for="scales">Checkpoints</label>
+  <input type="checkbox" id="q_start" name="q_start" checked>
+  <label for="scales">Query durations</label>
 </div>
 <div>
-  <button onclick="document.getElementById('file-input').click();">Open debug.log files</button>
+  <button onclick="document.getElementById('file-input').click();">Open 4.x query.log files</button>
   <input id="file-input" type="file" name="name" style="display: none;" multiple="multiple" onclick="this.value=null;"/>
+  <span id="open_files"></span>
 </div>
 <div id="visualization"></div>
+<div id="selected"></div>
 <script type="text/javascript">
   // DOM elements
   var container = document.getElementById('visualization');
   var fileInput = document.getElementById('file-input');
   var groupingInput = document.getElementById('grouping');
   var customRegexInput = document.getElementById('customRegex');
+  var openFileslabel = document.getElementById('open_files');
+  var selected = document.getElementById('selected');
+  
   var checks={
-                backup:   {regex:/\[backup-server\] Handling GetDatabaseIdRequest/, enabled:true},
-                startup:  {regex:/\[o.n.i.d.DiagnosticsManager\] $/,                enabled:true},
-                election: {regex:/A new leader has been detected/,                  enabled:true, type:"point"},
-                stw:      {regex:/Detected VM stop-the-world pause/,                enabled:true, type:"point"},
-                error:    {regex:/ ERROR /,                                         enabled:false, type:"point"},
-                custom:   {regex:/type a regex/,                                    enabled:false, type:"point"},
-                cp_start: {regex:/checkpoint started/,   paired_with:"cp_end",      enabled:false, type:"background"},
-                cp_end:   {regex:/checkpoint completed/,                            enabled:false},
+                error:    {regex:/ ERROR /,                                 enabled:true, type:"point"},
+                q_start: {regex:/Query started/,   paired_with:"q_end",     enabled:true, type:"range"},
+                q_end:   {regex:/INFO  id:/,                                enabled:true},
+                custom:   {regex:/type a regex/,                            enabled:false, type:"point"},
              };
-             //checkpoint
-             //leadership terms
   
   for (const [key, value] of Object.entries(checks)) {
     //TODO : create html elements from the list
@@ -117,7 +100,7 @@
   }
 
   init();
-  container.innerHTML = "Open one or several debug.log files to display events on a timeline."; 
+  container.innerHTML = "Open one or several query.log files to display events on a timeline."; 
   
 
   groupingInput.onchange = e => { 
@@ -132,16 +115,19 @@
 
   fileInput.onchange = e => { 
      init();
+     var label= "";
      var files = e.target.files; 
      fileCount = files.length;
      for (var i = 0;i < files.length;i++) { 
         console.log("Processing "+files[i].name+ " ...");
+        label+=files[i].name+" ";
         //console.log(files[i]);
         var reader = new FileReader();
         reader.onload = fileProcessor;
         reader.filePath = files[i].name;
         reader.readAsText(files[i],'UTF-8');
       }
+      openFileslabel.innerHTML=label;
   }
 
   function fileProcessor(readerEvent) {
@@ -149,51 +135,62 @@
       var lines = content.split('\n');
       console.log(readerEvent.target.filePath+" : "+lines.length+" lines");
       for(var i = 0;i < lines.length;i++){
-          if (checkLine(lines[i], "election")) {
-              fields=lines[i].split(" ");
-              leader=fields[12].split("{")[1].slice(0, -2);
-              db=fields[5].split("/")[0].substring(1);
-              addEvent(lines[i], "New leader: "+leader, getGroup(readerEvent.target.filePath, db), "election");
-          } else if (checkLine(lines[i], "backup")) {
-              db=lines[i].split(" ")[9];
-              addEvent(lines[i], "backup", getGroup(readerEvent.target.filePath, db), "backup");
-          } else if (checkLine(lines[i], "stw")) {
-              pause=lines[i].split(" ")[9].split("=")[1].slice(0, -1);
-              if (pause > 1000) {
-                addEvent(lines[i], pause+"ms", getGroup(readerEvent.target.filePath, null), "stw");
-              }
-          } else if (checkLine(lines[i], "startup")) {
-              addEvent(lines[i], "startup", getGroup(readerEvent.target.filePath, null), "startup");
-          } else if (checkLine(lines[i], "error")) {
-              javaClass=lines[i].split(" ")[3];
-              addEvent(lines[i], "ERROR "+javaClass, getGroup(readerEvent.target.filePath, null), "error");
+          if (checkLine(lines[i], "error")) {
+              var db=getDb(lines[i]);
+              var cypher = getCypher(lines[i]);
+              errorMsg=lines[i].split(" - ")[-1];
+              addEvent(lines[i], "ERROR "+errorMsg, getGroup(readerEvent.target.filePath, db, cypher), "error");
           } else if (checkLine(lines[i], "custom")) {
-              addEvent(lines[i], "custom", getGroup(readerEvent.target.filePath, null), "custom");
-          } else if (checkLine(lines[i], "cp_start")) {
-              var db=lines[i].split(" ")[5].split("/")[0].substring(1);
-              var tx_id=lines[i].split("@")[1].split(" ")[2];
-              var event_id=readerEvent.target.filePath+"_"+db+"_"+tx_id;
-              addEvent(lines[i], "Checkpoint txid="+tx_id, getGroup(readerEvent.target.filePath, db), "cp_start", event_id);
-          } else if (checkLine(lines[i], "cp_end")) {
-              db=lines[i].split(" ")[5].split("/")[0].substring(1);
-              tx_id=lines[i].split("@")[1].split(" ")[2];
-              var event_id=readerEvent.target.filePath+"_"+db+"_"+tx_id;
-              setEventEnd("cp_start", event_id, lines[i]);
+              var db=getDb(lines[i]);
+              var cypher = getCypher(lines[i]);
+              addEvent(lines[i], "custom", getGroup(readerEvent.target.filePath, db, cypher), "custom");
+          } else if (checkLine(lines[i], "q_start")) {
+              var db=getDb(lines[i]);
+              var cypher = getCypher(lines[i]);
+              var q_id=lines[i].split(" ")[6].split(":")[1];
+              var event_id=readerEvent.target.filePath+"_"+q_id;
+              addEvent(lines[i], q_id, getGroup(readerEvent.target.filePath, db, cypher), "q_start", event_id);
+          } else if (checkLine(lines[i], "q_end")) {
+              var q_id=lines[i].split(" ")[4].split(":")[1];
+              var event_id=readerEvent.target.filePath+"_"+q_id;
+              setEventEnd("q_start", event_id, lines[i]);
           }
-          //[o.n.g.f.DatabaseManagementServiceFactory] Shutdown started
-          //[contract/6f3637dc] Election timeout triggered
-          //leadership in background
-          //[c.n.c.c.c.RaftMachine] [system/00000000] Moving to LEADER state at term 2
-          //[c.n.c.d.a.AkkaCoreTopologyService] I am server ServerId{21bd674c}. Updating leader info to member RaftMemberId{6cbae5d8} DatabaseId{e55ba130[neo4j]} and term 8
       }
       fileProcessed+=1;
       if (fileProcessed == fileCount) { display() }
   }
   
+
+  function getCypher(line) {
+    var protocol=line.split("\t")[1];
+    var cypher="?";
+    if (protocol=="bolt") {
+      cypher = line.split("\t")[6].split(" -  {")[0].split(" - ")[2];
+    } else if (protocol=="http") {
+      cypher = line.split("\t")[4].split(" -  {")[0].split(" - ")[2];
+    } else { //embedded
+      cypher = line.split("\t")[2].split(" -  {")[0].split(" - ")[2];
+    }
+    return cypher.substr(0,200);
+  }
+  function getDb(line) {
+    var protocol=line.split("\t")[1];
+    var db="?";
+    if (protocol=="bolt") {
+      db = line.split("\t")[6].split(" ")[0];
+    } else if (protocol=="http") {
+      db = line.split("\t")[4].split(" ")[0];
+    } else { //embedded
+      db = line.split("\t")[2].split(" ")[0];
+    }
+    return db;
+  }
+
   function setEventEnd(category, event_id, line) {
     var event=eventsArray.find(event => (event.event_id == event_id && event.category == category &&  !("end" in event) ));
     if (event) {
         event.end = getTimestamp(line.split(" "));
+        event.title = line; //overwrite with end message
     }
   }
 
@@ -229,7 +226,7 @@
     return fields.slice(0, 2).join(" ");
   }
 
-  function getGroup(file, db) {
+  function getGroup(file, db, cypher) {
     var group;
     var groupId=-1;
     if (groupBy == "db") {
@@ -240,6 +237,12 @@
         }
     } else if (groupBy == "file") {
         group = file;
+    } else if (groupBy == "cypher") {
+        if (db != null) {
+          group = "["+db+"]<br>"+cypher.split('').reduce((a, e, i)=> a +e + (i % 40 === 39 ? '<br>' : ''), '');
+        } else {
+          group = cypher;
+        }
     }
     //find or add group
     for(var i = 0;i < window.groups.length;i++){ 
@@ -260,11 +263,15 @@
 
   function display() {
       console.log("Processed files : "+fileProcessed+"/"+fileCount);
+      console.log(eventsArray);
       items = new vis.DataSet(window.eventsArray.filter(event => ( !(["background", "range"].includes(event.type)) ||  ("end" in event) )));  //filter any unclosed range
       console.log("events: "+items.length);
-      console.log(eventsArray);
+      console.log(groups);
       var clusterConfig={clusterCriteria:clusterCriteria, maxItems:2, titleTemplate:"{count} events"};
       timeline = new vis.Timeline(container, items, groups, {maxHeight:1000, orientation:"both", margin:{item:2}}); //,  cluster:clusterConfig, template:template
+      timeline.on('select', function (properties) {
+        selected.innerHTML = items.get(properties.items)[0].title;
+      });
   }
 
 </script>
